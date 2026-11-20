@@ -14,7 +14,7 @@ private struct GlassCard: ViewModifier {
         } else {
             content
                 .background(.ultraThinMaterial, in: shape)
-                .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
         }
     }
 }
@@ -114,30 +114,6 @@ private struct StatusPill: View {
     }
 }
 
-/// Soft colored blobs so the glass has something to refract.
-private struct Backdrop: View {
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.05, green: 0.07, blue: 0.20),
-                    Color(red: 0.20, green: 0.08, blue: 0.35),
-                    Color(red: 0.03, green: 0.20, blue: 0.30)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Circle().fill(Color.cyan.opacity(0.35))
-                .frame(width: 300, height: 300).blur(radius: 70).offset(x: -140, y: -260)
-            Circle().fill(Color.purple.opacity(0.40))
-                .frame(width: 340, height: 340).blur(radius: 80).offset(x: 150, y: 120)
-            Circle().fill(Color.pink.opacity(0.25))
-                .frame(width: 260, height: 260).blur(radius: 70).offset(x: -120, y: 380)
-        }
-        .ignoresSafeArea()
-    }
-}
-
 // MARK: - Screen
 
 struct ContentView: View {
@@ -146,11 +122,17 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            Backdrop()
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
 
             ScrollView {
                 VStack(spacing: 16) {
-                    header
+                    HStack {
+                        Text("iNoty")
+                            .font(.largeTitle.bold())
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, 8)
 
                     HStack(spacing: 12) {
                         StatusPill(
@@ -178,6 +160,26 @@ struct ContentView: View {
                                 model.regenerateToken()
                                 flash("New token generated")
                             }
+                        }
+                    }
+
+                    Card("Network access") {
+                        Toggle(isOn: Binding(
+                            get: { model.allowNetwork },
+                            set: { model.setAllowNetwork($0) }
+                        )) {
+                            Text("Allow other devices on my network")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        Text(model.allowNetwork
+                             ? "On: devices on your Wi-Fi or another private network can send requests if they have the token. Traffic is plain HTTP, so only use this on networks you trust."
+                             : "Off: only this phone can send requests.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if let url = model.networkURL {
+                            Text(url)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
                         }
                     }
 
@@ -216,7 +218,6 @@ struct ContentView: View {
                 .padding(.vertical, 20)
             }
         }
-        .preferredColorScheme(.dark)
         .overlay(alignment: .bottom) {
             if let toast = toast {
                 Text(toast)
@@ -229,25 +230,6 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: toast)
-    }
-
-    private var header: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "bell.badge.fill")
-                .font(.title2)
-                .foregroundStyle(.white)
-                .frame(width: 52, height: 52)
-                .glassCard(radius: 16)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("iNoty")
-                    .font(.largeTitle.bold())
-                Text("Local notification server")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 8)
     }
 
     private func flash(_ text: String) {

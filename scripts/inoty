@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# inoty - send notifications to the iNoty iOS app.
+#
+#   inoty setup                      save the token (and host/port) once
+#   inoty send "Title" "Body" ...    send a notification (see --help)
+#   inoty "Title" "Body"             same as send
+#   inoty clear [id]                 remove one notification, or all of them
+#   inoty raw '{"title":"x"}'        send your own JSON body ('-' reads stdin)
+#   inoty health | config | help
+#
+# Works with bash 3.2+ (macOS default) and needs only curl and awk.
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/inoty"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+HOST="127.0.0.1"
+PORT="8765"
+TOKEN=""
+
+die() { echo "inoty: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- config
+
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    local key value
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+      case "$key" in
+        INOTY_HOST)  HOST="$value" ;;
+        INOTY_PORT)  PORT="$value" ;;
+        INOTY_TOKEN) TOKEN="$value" ;;
+      esac
+    done < "$CONFIG_FILE"
+  fi
+  # Environment variables override the saved config.
+  HOST="${INOTY_HOST:-$HOST}"
+  PORT="${INOTY_PORT:-$PORT}"
+  TOKEN="${INOTY_TOKEN:-$TOKEN}"
+}
+
+save_config() {
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  ( umask 077; printf 'INOTY_HOST=%s\nINOTY_PORT=%s\nINOTY_TOKEN=%s\n' "$HOST" "$PORT" "$TOKEN" > "$CONFIG_FILE" )
+  chmod 600 "$CONFIG_FILE"
+}
+
+base_url() {
+  case "$HOST" in
+    *:*) echo "http://[$HOST]:$PORT" ;;
+    *)   echo "http://$HOST:$PORT" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- helpers
+
+json_escape() {
+  local s
+  s="$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+join_by_comma() { local IFS=,; printf '%s' "$*"; }
+
+is_number() { local re='^-?[0-9]+(\.[0-9]+)?$'; [[ "$1" =~ $re ]]; }
+
+parse_duration() {   # 90 | 30s | 5m | 2h | 1d  ->  seconds
+  local v="$1" re='^([0-9]+(\.[0-9]+)?)([smhd]?)$' num unit mult
+  [[ "$v" =~ $re ]] || die "bad duration '$v' (use e.g. 90, 30s, 5m, 2h, 1d)"
+  num="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[3]}"
+  [ -n "$unit" ] || unit="s"
+  case "$unit" in s) mult=1 ;; m) mult=60 ;; h) mult=3600 ;; d) mult=86400 ;; esac
+  awk -v n="$num" -v m="$mult" 'BEGIN { printf "%d", n * m }'
+}
+
+request() {   # request METHOD PATH [BODYFILE]
+  local method="$1" path="$2" bodyfile="${3:-}" out code
+  [ -n "$TOKEN" ] || die "no token saved. Run: inoty setup"
+  local args=(-sS --max-time 30 -X "$method" "$(base_url)$path" -K -)
+  if [ -n "$bodyfile" ]; then
+    args+=(-H "Content-Type: application/json" --data-binary "@$bodyfile")
+  fi
+  # The token goes in through curl's config on stdin so it never shows up in `ps`.
+  out="$(printf 'header = "X-Token: %s"\n' "$TOKEN" | curl "${args[@]}" -w $'\n%{http_code}')" \
+    || die "could not reach iNoty at $(base_url) (is the app running? is network access on?)"
+  code="${out##*$'\n'}"
+  out="${out%$'\n'*}"
+  if [ "$code" = "200" ]; then
+    echo "$out"
+  else
+    echo "inoty: HTTP $code: $out" >&2
+    exit 1
+  fi
+}
+
+send_json() {   # send_json PATH JSON
+  local tmp rc=0
+  tmp="$(mktemp)"
+  printf '%s' "$2" > "$tmp"
+  request POST "$1" "$tmp" || rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_setup() {
+  local t="" h="" p=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --token) [ $# -ge 2 ] || die "missing value for $1"; t="$2"; shift 2 ;;
+      --host)  [ $# -ge 2 ] || die "missing value for $1"; h="$2"; shift 2 ;;
+      --port)  [ $# -ge 2 ] || die "missing value for $1"; p="$2"; shift 2 ;;
+      *) die "unknown option for setup: $1" ;;
+    esac
+  done
+  if [ -z "$t" ]; then
+    printf 'Paste the secret token shown in iNoty: ' >&2
+    read -r -s t
+    echo >&2
+  fi
+  [ -z "$h" ] || HOST="$h"
+  [ -z "$p" ] || PORT="$p"
+  TOKEN="$t"
+
+  local re_token='^[A-Za-z0-9._~-]+$' re_host='^[A-Za-z0-9._:-]+$' re_port='^[0-9]+$'
+  [[ "$TOKEN" =~ $re_token ]] || die "token is empty or has unexpected characters"
+  [[ "$HOST" =~ $re_host ]] || die "host looks wrong: $HOST"
+  [[ "$PORT" =~ $re_port ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "port looks wrong: $PORT"
+
+  save_config
+  echo "Saved to $CONFIG_FILE"
+  if curl -sS --max-time 5 "$(base_url)/health" >/dev/null 2>&1; then
+    echo "iNoty is reachable at $(base_url)"
+  else
+    echo "Could not reach iNoty at $(base_url) yet (config is saved anyway)." >&2
+  fi
+}
+
+cmd_config() {
+  local masked="(none)"
+  if [ -n "$TOKEN" ]; then masked="${TOKEN:0:4}...(${#TOKEN} chars)"; fi
+  echo "config file: $CONFIG_FILE"
+  echo "host:        $HOST"
+  echo "port:        $PORT"
+  echo "token:       $masked"
+}
+
+cmd_health() {
+  curl -sS --max-time 5 "$(base_url)/health" || die "could not reach iNoty at $(base_url)"
+  echo
+}
+
+cmd_clear() {
+  if [ $# -ge 1 ] && [ -n "$1" ]; then
+    send_json /clear "{\"id\":\"$(json_escape "$1")\"}"
+  else
+    send_json /clear "{}"
+  fi
+}
+
+cmd_raw() {
+  local body="${1:-}"
+  [ -n "$body" ] || die "usage: inoty raw '{...json...}'   (or '-' to read stdin)"
+  if [ "$body" = "-" ]; then body="$(cat)"; fi
+  send_json /notify "$body"
+}
+
+FIELDS=()
+ACTIONS=()
+DATA=()
+add_str() { FIELDS+=("\"$1\":\"$(json_escape "$2")\""); }
+add_raw() { FIELDS+=("\"$1\":$2"); }
+
+cmd_send() {
+  local title="" body="" have_title=0 have_body=0 dry_run=0 opt
+  while [ $# -gt 0 ]; do
+    opt="$1"
+    case "$opt" in
+      --repeat|--dry-run|-h|--help|-) ;;
+      -*) [ $# -ge 2 ] || die "missing value for $opt" ;;
+    esac
+    case "$opt" in
+      -s|--subtitle)   add_str subtitle "$2"; shift 2 ;;
+      --sound)         add_str sound "$2"; shift 2 ;;
+      --badge)         is_number "$2" || die "--badge needs a number"; add_raw badge "$2"; shift 2 ;;
+      --level)         add_str level "$2"; shift 2 ;;
+      --relevance)     is_number "$2" || die "--relevance needs a number (0-1)"; add_raw relevance "$2"; shift 2 ;;
+      --thread)        add_str thread "$2"; shift 2 ;;
+      --id)            add_str id "$2"; shift 2 ;;
+      --delay)         add_raw delay "$(parse_duration "$2")"; shift 2 ;;
+      --at)            add_str at "$2"; shift 2 ;;
+      --repeat)        add_raw repeat true; shift ;;
+      --image)         add_str image "$2"; shift 2 ;;
+      --image-file)
+        [ -f "$2" ] || die "no such file: $2"
+        add_str imageBase64 "$(base64 < "$2" | tr -d '\n')"
+        shift 2 ;;
+      --url)           add_str url "$2"; shift 2 ;;
+      --target)        add_str target "$2"; shift 2 ;;
+      --summary)       add_str summary "$2"; shift 2 ;;
+      --action)
+        local a_id="" a_title="" a_url="" a_flags="" obj
+        IFS='|' read -r a_id a_title a_url a_flags <<< "$2"
+        [ -n "$a_title" ] || die "--action needs at least 'id|Title' (full form: id|Title|url|destructive,foreground,auth)"
+        obj="{"
+        if [ -n "$a_id" ]; then obj+="\"id\":\"$(json_escape "$a_id")\","; fi
+        obj+="\"title\":\"$(json_escape "$a_title")\""
+        if [ -n "$a_url" ]; then obj+=",\"url\":\"$(json_escape "$a_url")\""; fi
+        case ",$a_flags," in *,destructive,*) obj+=',"destructive":true' ;; esac
+        case ",$a_flags," in *,foreground,*) obj+=',"foreground":true' ;; esac
+        case ",$a_flags," in *,auth,*) obj+=',"auth":true' ;; esac
+        obj+="}"
+        ACTIONS+=("$obj")
+        shift 2 ;;
+      --data)
+        case "$2" in *=*) ;; *) die "--data needs key=value" ;; esac
+        DATA+=("\"$(json_escape "${2%%=*}")\":\"$(json_escape "${2#*=}")\"")
+        shift 2 ;;
+      --dry-run)       dry_run=1; shift ;;
+      -h|--help)       usage; exit 0 ;;
+      -*)
+        if [ "$opt" != "-" ]; then die "unknown option: $opt (try: inoty help)"; fi
+        # A lone "-" means "read the message from stdin" and is handled like any positional argument.
+        if [ "$have_title" -eq 0 ]; then title="$1"; have_title=1
+        elif [ "$have_body" -eq 0 ]; then body="$1"; have_body=1
+        else die "unexpected argument: $1 (quote titles and messages)"
+        fi
+        shift ;;
+      *)
+        if [ "$have_title" -eq 0 ]; then title="$1"; have_title=1
+        elif [ "$have_body" -eq 0 ]; then body="$1"; have_body=1
+        else die "unexpected argument: $1 (quote titles and messages)"
+        fi
+        shift ;;
+    esac
+  done
+
+  if [ "$body" = "-" ]; then body="$(cat)"; fi
+  if [ -z "$title" ] && [ -z "$body" ]; then die "need a title or a message (try: inoty help)"; fi
+  if [ -n "$title" ]; then add_str title "$title"; fi
+  if [ -n "$body" ]; then add_str body "$body"; fi
+
+  local json="{$(join_by_comma "${FIELDS[@]}")"
+  if [ ${#ACTIONS[@]} -gt 0 ]; then json+=",\"actions\":[$(join_by_comma "${ACTIONS[@]}")]"; fi
+  if [ ${#DATA[@]} -gt 0 ]; then json+=",\"data\":{$(join_by_comma "${DATA[@]}")}"; fi
+  json+="}"
+
+  if [ "$dry_run" -eq 1 ]; then
+    echo "$json"
+    return 0
+  fi
+  send_json /notify "$json"
+}
+
+usage() {
+  cat <<'EOF'
+inoty - send notifications to the iNoty app
+
+  inoty setup [--token T] [--host H] [--port P]   save token/host/port (prompts for the token)
+  inoty send TITLE [MESSAGE] [options]            send a notification (use '-' as MESSAGE to read stdin)
+  inoty TITLE [MESSAGE] [options]                 shorthand for send
+  inoty clear [ID]                                remove a notification by id, or all of them
+  inoty raw JSON                                  send your own JSON body ('-' reads stdin)
+  inoty health | config | help
+
+Options for send:
+  -s, --subtitle TEXT      second line
+      --sound VALUE        default | none | ringtone
+      --badge N            app badge number
+      --level VALUE        passive | active | timeSensitive
+      --relevance 0-1      ordering in the notification summary
+      --thread ID          group notifications together
+      --id ID              same id replaces the earlier notification
+      --delay TIME         90, 30s, 5m, 2h, 1d  (deliver later)
+      --repeat             repeat every --delay (minimum 60s)
+      --at WHEN            ISO 8601 e.g. 2026-11-21T18:30:00+03:00
+      --image URL          attach an https image (PNG/JPEG/GIF)
+      --image-file PATH    attach a local image
+      --url URL            open this when the notification is tapped
+      --summary TEXT       text used in grouped summaries
+      --target ID          target content identifier
+      --action SPEC        add a button: 'id|Title|url|destructive,foreground,auth' (repeatable)
+      --data KEY=VALUE     custom payload field (repeatable)
+      --dry-run            print the JSON instead of sending it
+
+Examples:
+  inoty send "Build done" "All tests passed"
+  inoty send "Backup" "Finished" --sound none --thread backups
+  inoty send "Stand up" "Meeting soon" --delay 10m --id standup
+  inoty send "Deploy?" "main is green" --action "yes|Deploy|https://example.com/deploy" --action "no|Skip"
+  long_job; inoty "long_job finished" "exit code $?"
+  inoty clear standup
+EOF
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  load_config
+  local cmd="${1:-help}"
+  case "$cmd" in
+    setup)          shift; cmd_setup "$@" ;;
+    send)           shift; cmd_send "$@" ;;
+    clear)          shift; cmd_clear "$@" ;;
+    raw)            shift; cmd_raw "$@" ;;
+    health)         cmd_health ;;
+    config)         cmd_config ;;
+    help|-h|--help) usage ;;
+    *)              cmd_send "$@" ;;
+  esac
+}
+
+main "$@"
