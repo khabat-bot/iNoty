@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published var serverStatus = "Stopped"
     @Published var audioStatus = "Stopped"
     @Published var log: [String] = []
+    @Published var notifStatus = "Unknown"
+    @Published var delivery = "Nothing sent yet"
 
     private let server = LocalServer()
     private let audio = SilentAudio()
@@ -36,6 +38,12 @@ final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
 
+        Notifier.shared.onStatus = { [weak self] status in
+            DispatchQueue.main.async { self?.notifStatus = status }
+        }
+        Notifier.shared.onDelivery = { [weak self] result in
+            DispatchQueue.main.async { self?.setDelivery(result) }
+        }
         Notifier.shared.setup()
         server.setToken(token)
 
@@ -61,6 +69,7 @@ final class AppModel: ObservableObject {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.audio.ensurePlaying()
+            Notifier.shared.refreshStatus()
             if !self.serverStatus.hasPrefix("Listening") {
                 self.server.start(port: AppModel.port)
             }
@@ -84,6 +93,12 @@ final class AppModel: ObservableObject {
         f.dateFormat = "HH:mm:ss"
         log.insert("\(f.string(from: Date()))  \(title)", at: 0)
         if log.count > 30 { log.removeLast(log.count - 30) }
+    }
+
+    private func setDelivery(_ result: String) {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        delivery = "\(f.string(from: Date()))  \(result)"
     }
 
     private static func makeToken() -> String {

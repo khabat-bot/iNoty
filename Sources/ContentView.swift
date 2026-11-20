@@ -12,6 +12,17 @@ struct ContentView: View {
                     row("Background audio", model.audioStatus)
                 }
 
+                Section("Notifications") {
+                    row("Permission", model.notifStatus)
+                    row("Last delivery", model.delivery)
+                    Button("Request permission again") { Notifier.shared.requestPermission() }
+                    Button("Open iOS Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                }
+
                 Section("Secret token") {
                     Text(model.token)
                         .font(.system(.footnote, design: .monospaced))
