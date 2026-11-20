@@ -2,6 +2,8 @@
 
 A tiny iOS app for LiveContainer. It runs a minimal HTTP server on `127.0.0.1` (loopback only, so nothing on your Wi-Fi can reach it) and turns each request into a local notification. It stays alive in the background by looping silent audio.
 
+The UI uses Liquid Glass on iOS 26 and falls back to a blur material on older versions.
+
 ## Sending a notification
 
 Every request needs the secret token shown in the app (first launch generates it).
@@ -18,11 +20,13 @@ From iOS Shortcuts, use "Get Contents of URL" with the URL above.
 
 ## Build
 
-Push to `main` (or run the workflow manually). GitHub Actions builds an unsigned `iNoty.ipa` and uploads it as the `iNoty-ipa` artifact. Pushing a `v*` tag also attaches it to a release.
+Push to `main` (or run the workflow manually). GitHub Actions builds an unsigned `iNoty.ipa` on a `macos-26` runner (Xcode 26, needed for the Liquid Glass APIs) and uploads it as the `iNoty-ipa` artifact. Pushing a `v*` tag also attaches it to a release.
 
 ## Install
 
-Open the IPA in LiveContainer. LiveContainer signs it itself. Open iNoty once, allow notifications, then leave it running.
+1. Open the IPA in LiveContainer. LiveContainer signs it itself.
+2. **Enable "Fix Local Notification"** in iNoty's settings inside LiveContainer. Without it iOS rejects notifications from the guest app (`UNErrorDomain error 1`) and the permission prompt never appears.
+3. Open iNoty once, allow notifications, then leave it running.
 
 ## Notes
 
