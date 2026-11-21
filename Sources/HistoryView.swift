@@ -75,6 +75,7 @@ struct HistoryDetail: View {
     private var kindLabel: String {
         switch entry.kind {
         case "test": return "Test button"
+        case "remote": return "Internet request (relay)"
         case "clear": return "Clear request"
         default: return "Notification request"
         }
@@ -82,7 +83,7 @@ struct HistoryDetail: View {
 
     private var resultLabel: String {
         if let error = entry.error { return "Failed: \(error)" }
-        return entry.kind == "notify" || entry.kind == "test" ? "Handed to iOS" : "Done"
+        return ["notify", "test", "remote"].contains(entry.kind) ? "Handed to iOS" : "Done"
     }
 
     var body: some View {

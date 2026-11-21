@@ -22,6 +22,10 @@ final class AppModel: ObservableObject {
     private static let historyLimitKey = "inoty.historyLimit"
     static let historyLimitRange = 10...500
     static let defaultHistoryLimit = 100
+    static let defaultRelayServer = "https://ntfy.sh"
+    private static let relayEnabledKey = "inoty.relayEnabled"
+    private static let relayTopicKey = "inoty.relayTopic"
+    private static let relayServerKey = "inoty.relayServer"
 
     @Published var token: String
     @Published var allowNetwork: Bool
@@ -30,7 +34,12 @@ final class AppModel: ObservableObject {
     @Published var audioStatus = "Starting"
     @Published var history: [HistoryEntry]
     @Published var historyLimit: Int
+    @Published var relayEnabled: Bool
+    @Published var relayTopic: String
+    @Published var relayServer: String
+    @Published var relayStatus = "Off"
 
+    private let relay = RelayClient()
     private let server = LocalServer()
     private let audio = SilentAudio()
     private var started = false
@@ -50,7 +59,21 @@ final class AppModel: ObservableObject {
         let limit = AppModel.historyLimitRange.contains(savedLimit) ? savedLimit : AppModel.defaultHistoryLimit
         historyLimit = limit
         history = Array(AppModel.loadHistory().prefix(limit))
+
+        relayEnabled = defaults.bool(forKey: AppModel.relayEnabledKey)
+        relayServer = defaults.string(forKey: AppModel.relayServerKey) ?? AppModel.defaultRelayServer
+        if let savedTopic = defaults.string(forKey: AppModel.relayTopicKey), !savedTopic.isEmpty {
+            relayTopic = savedTopic
+        } else {
+            let fresh = AppModel.makeRelayTopic()
+            defaults.set(fresh, forKey: AppModel.relayTopicKey)
+            relayTopic = fresh
+        }
     }
+
+    /// The address that senders post to.
+    var relayURL: String { relayServer + "/" + relayTopic }
+    var relayOK: Bool { relayStatus == "Connected" }
 
     var serverOK: Bool { serverStatus.hasPrefix("Listening") }
     var audioOK: Bool { audioStatus == "Playing silence" }
@@ -100,8 +123,15 @@ final class AppModel: ObservableObject {
         audio.onState = { [weak self] status in
             DispatchQueue.main.async { self?.audioStatus = status }
         }
+        relay.onState = { [weak self] status in
+            DispatchQueue.main.async { self?.relayStatus = status }
+        }
+        relay.onMessage = { [weak self] event in
+            self?.handleRelay(event)
+        }
 
         audio.start()
+        if relayEnabled { relay.start(server: relayServer, topic: relayTopic) }
         refreshLAN()
         server.start(port: AppModel.port, allowNetwork: allowNetwork)
 
@@ -114,6 +144,7 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             self.audio.ensurePlaying()
             self.refreshLAN()
+            if self.relayEnabled { self.relay.reconnect() }
             if !self.serverOK {
                 self.server.start(port: AppModel.port, allowNetwork: self.allowNetwork)
             }
@@ -149,6 +180,95 @@ final class AppModel: ObservableObject {
     func clearHistory() {
         history = []
         saveHistory()
+    }
+
+    // MARK: Internet relay
+
+    func setRelayEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: AppModel.relayEnabledKey)
+        relayEnabled = enabled
+        if enabled {
+            RelayClient.resetCursor()
+            relayStatus = "Connecting..."
+            relay.start(server: relayServer, topic: relayTopic)
+        } else {
+            relay.stop()
+            relayStatus = "Off"
+        }
+    }
+
+    /// Replaces the secret topic. Anyone who had the old address can no longer send.
+    func regenerateRelayTopic() {
+        let fresh = AppModel.makeRelayTopic()
+        UserDefaults.standard.set(fresh, forKey: AppModel.relayTopicKey)
+        relayTopic = fresh
+        RelayClient.resetCursor()
+        if relayEnabled { relay.start(server: relayServer, topic: relayTopic) }
+    }
+
+    /// Saves a new relay server. Returns an error message, or nil when it was saved.
+    func setRelayServer(_ input: String) -> String? {
+        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("/") { text.removeLast() }
+        guard let parts = URLComponents(string: text),
+              parts.scheme?.lowercased() == "https",
+              let host = parts.host, !host.isEmpty,
+              parts.query == nil, parts.fragment == nil
+        else { return "Use an https address such as https://ntfy.sh" }
+
+        UserDefaults.standard.set(text, forKey: AppModel.relayServerKey)
+        relayServer = text
+        RelayClient.resetCursor()
+        if relayEnabled { relay.start(server: relayServer, topic: relayTopic) }
+        return nil
+    }
+
+    /// A message arrived from the relay. It is either a JSON object with the same fields as a
+    /// local request, or plain text (used as the body). Runs on the relay queue.
+    private func handleRelay(_ event: [String: Any]) {
+        let text = (event["message"] as? String) ?? ""
+        var raw: [String: Any] = [:]
+        if let data = text.data(using: .utf8),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            raw = object
+        } else {
+            raw["body"] = text
+        }
+
+        // ntfy's own Title header counts too, except its automatic "ntfy.sh/<topic>" default,
+        // which would put the secret topic on the lock screen.
+        if raw["title"] == nil, let title = event["title"] as? String {
+            let topic = (event["topic"] as? String) ?? ""
+            if topic.isEmpty || !title.hasSuffix("/" + topic) { raw["title"] = title }
+        }
+
+        if let flag = raw["clear"],
+           (flag as? Bool) == true || (flag as? String)?.lowercased() == "true" {
+            let id = raw["id"] as? String
+            Notifier.shared.clear(id: id)
+            DispatchQueue.main.async { [weak self] in
+                self?.record(kind: "clear", title: id.map { "Clear \($0) (internet)" } ?? "Clear all (internet)",
+                             body: "", error: nil, details: NotificationSpec.describe(raw))
+            }
+            return
+        }
+
+        do {
+            let spec = try NotificationSpec.from(raw)
+            Notifier.shared.post(spec) { [weak self] _, error in
+                DispatchQueue.main.async {
+                    self?.record(kind: "remote", title: spec.title, body: spec.body,
+                                 error: error, details: spec.details)
+                }
+            }
+        } catch let error as SpecError {
+            DispatchQueue.main.async { [weak self] in
+                self?.record(kind: "remote", title: "Rejected request", body: "",
+                             error: error.description, details: NotificationSpec.describe(raw))
+            }
+        } catch {
+            // Not reachable: from() only throws SpecError.
+        }
     }
 
     /// Changes how many requests are kept; older ones beyond the new limit are deleted.
@@ -198,6 +318,11 @@ final class AppModel: ObservableObject {
 
     private func refreshLAN() {
         lanAddress = LocalIP.ipv4()
+    }
+
+    /// ntfy topics may use letters, digits, "-" and "_". 128 random bits make it unguessable.
+    private static func makeRelayTopic() -> String {
+        "inoty-" + makeToken()
     }
 
     private static func makeToken() -> String {

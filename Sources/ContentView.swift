@@ -195,6 +195,43 @@ struct ContentView: View {
                         }
                     }
 
+                    Card("Internet relay") {
+                        Toggle(isOn: Binding(
+                            get: { model.relayEnabled },
+                            set: { model.setRelayEnabled($0) }
+                        )) {
+                            Text("Receive requests over the internet")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        Text(model.relayEnabled
+                             ? "On: the app listens to a secret topic on \(model.relayServer). Anyone who knows the address below can send you notifications, and the relay server can read them. Keep the address secret and don't send anything sensitive."
+                             : "Off: nothing is received from the internet.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if model.relayEnabled {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(model.relayOK ? Color.green : Color.orange)
+                                    .frame(width: 8, height: 8)
+                                Text(model.relayStatus)
+                                    .font(.footnote.weight(.semibold))
+                            }
+                            Text(model.relayURL)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                            HStack(spacing: 10) {
+                                GlassButton(title: "Copy address", systemImage: "link", prominent: true) {
+                                    UIPasteboard.general.string = model.relayURL
+                                    flash("Address copied")
+                                }
+                                GlassButton(title: "New topic", systemImage: "arrow.triangle.2.circlepath", tint: .red) {
+                                    model.regenerateRelayTopic()
+                                    flash("New topic generated")
+                                }
+                            }
+                        }
+                    }
+
                     Card("Usage") {
                         Text(model.exampleURL)
                             .font(.system(.footnote, design: .monospaced))

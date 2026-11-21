@@ -2,6 +2,7 @@
 # inoty - send notifications to the iNoty iOS app.
 #
 #   inoty setup                      save the token (and host/port) once
+#   inoty setup --relay URL          send over the internet through the relay instead
 #   inoty send "Title" "Body" ...    send a notification (see --help)
 #   inoty "Title" "Body"             same as send
 #   inoty clear [id]                 remove one notification, or all of them
@@ -18,6 +19,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 HOST="127.0.0.1"
 PORT="8765"
 TOKEN=""
+RELAY=""      # e.g. https://ntfy.sh/inoty-abc123 (the secret address shown in the app)
 
 die() { echo "inoty: $*" >&2; exit 1; }
 
@@ -31,6 +33,7 @@ load_config() {
         INOTY_HOST)  HOST="$value" ;;
         INOTY_PORT)  PORT="$value" ;;
         INOTY_TOKEN) TOKEN="$value" ;;
+        INOTY_RELAY) RELAY="$value" ;;
       esac
     done < "$CONFIG_FILE"
   fi
@@ -38,12 +41,14 @@ load_config() {
   HOST="${INOTY_HOST:-$HOST}"
   PORT="${INOTY_PORT:-$PORT}"
   TOKEN="${INOTY_TOKEN:-$TOKEN}"
+  # An empty INOTY_RELAY on purpose turns the relay off for one command (send locally).
+  RELAY="${INOTY_RELAY-$RELAY}"
 }
 
 save_config() {
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
-  ( umask 077; printf 'INOTY_HOST=%s\nINOTY_PORT=%s\nINOTY_TOKEN=%s\n' "$HOST" "$PORT" "$TOKEN" > "$CONFIG_FILE" )
+  ( umask 077; printf 'INOTY_HOST=%s\nINOTY_PORT=%s\nINOTY_TOKEN=%s\nINOTY_RELAY=%s\n' "$HOST" "$PORT" "$TOKEN" "$RELAY" > "$CONFIG_FILE" )
   chmod 600 "$CONFIG_FILE"
 }
 
@@ -101,11 +106,33 @@ request() {   # request METHOD PATH [BODYFILE]
   fi
 }
 
-send_json() {   # send_json PATH JSON
+relay_publish() {   # relay_publish BODYFILE  - post the JSON as a message on the relay topic
+  local bodyfile="$1" out code size
+  size="$(wc -c < "$bodyfile" | tr -d ' ')"
+  [ "$size" -le 4096 ] || die "request is $size bytes; the relay is meant for messages up to 4096 (leave out imageBase64 or shorten the text)"
+  # The address is the secret, so it goes in through curl's config on stdin and never shows up in `ps`.
+  out="$(printf 'url = "%s"\n' "$RELAY" | curl -sS --max-time 30 -X POST \
+        -H "Content-Type: text/plain" --data-binary "@$bodyfile" -K - -w $'\n%{http_code}')" \
+    || die "could not reach the relay"
+  code="${out##*$'\n'}"
+  out="${out%$'\n'*}"
+  if [ "$code" = "200" ]; then
+    echo "sent via relay"
+  else
+    echo "inoty: relay answered HTTP $code: $out" >&2
+    exit 1
+  fi
+}
+
+send_json() {   # send_json PATH JSON   (goes to the relay when one is set up, else to the app directly)
   local tmp rc=0
   tmp="$(mktemp)"
   printf '%s' "$2" > "$tmp"
-  request POST "$1" "$tmp" || rc=$?
+  if [ -n "$RELAY" ]; then
+    relay_publish "$tmp" || rc=$?
+  else
+    request POST "$1" "$tmp" || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -113,32 +140,45 @@ send_json() {   # send_json PATH JSON
 # ---------------------------------------------------------------- commands
 
 cmd_setup() {
-  local t="" h="" p=""
+  local t="" h="" p="" r="" relay_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --token) [ $# -ge 2 ] || die "missing value for $1"; t="$2"; shift 2 ;;
-      --host)  [ $# -ge 2 ] || die "missing value for $1"; h="$2"; shift 2 ;;
-      --port)  [ $# -ge 2 ] || die "missing value for $1"; p="$2"; shift 2 ;;
+      --token)    [ $# -ge 2 ] || die "missing value for $1"; t="$2"; shift 2 ;;
+      --host)     [ $# -ge 2 ] || die "missing value for $1"; h="$2"; shift 2 ;;
+      --port)     [ $# -ge 2 ] || die "missing value for $1"; p="$2"; shift 2 ;;
+      --relay)    [ $# -ge 2 ] || die "missing value for $1"; r="$2"; relay_given=1; shift 2 ;;
+      --no-relay) r=""; relay_given=1; shift ;;
       *) die "unknown option for setup: $1" ;;
     esac
   done
-  if [ -z "$t" ]; then
+
+  # Ask for the token unless it was given on the command line or only the relay is being changed.
+  if [ -z "$t" ] && [ "$relay_given" -eq 0 ]; then
     printf 'Paste the secret token shown in iNoty: ' >&2
     read -r -s t
     echo >&2
   fi
   [ -z "$h" ] || HOST="$h"
   [ -z "$p" ] || PORT="$p"
-  TOKEN="$t"
+  [ -z "$t" ] || TOKEN="$t"
+  [ "$relay_given" -eq 0 ] || RELAY="$r"
 
   local re_token='^[A-Za-z0-9._~-]+$' re_host='^[A-Za-z0-9._:-]+$' re_port='^[0-9]+$'
-  [[ "$TOKEN" =~ $re_token ]] || die "token is empty or has unexpected characters"
+  local re_relay='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)+$'
+  if [ "$relay_given" -eq 0 ] || [ -n "$TOKEN" ]; then
+    [[ "$TOKEN" =~ $re_token ]] || die "token is empty or has unexpected characters"
+  fi
   [[ "$HOST" =~ $re_host ]] || die "host looks wrong: $HOST"
   [[ "$PORT" =~ $re_port ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "port looks wrong: $PORT"
+  if [ -n "$RELAY" ]; then
+    [[ "$RELAY" =~ $re_relay ]] || die "relay must look like https://ntfy.sh/your-topic (copy it from the app)"
+  fi
 
   save_config
   echo "Saved to $CONFIG_FILE"
-  if curl -sS --max-time 5 "$(base_url)/health" >/dev/null 2>&1; then
+  if [ -n "$RELAY" ]; then
+    echo "Requests will be sent over the internet through the relay."
+  elif curl -sS --max-time 5 "$(base_url)/health" >/dev/null 2>&1; then
     echo "iNoty is reachable at $(base_url)"
   else
     echo "Could not reach iNoty at $(base_url) yet (config is saved anyway)." >&2
@@ -146,25 +186,37 @@ cmd_setup() {
 }
 
 cmd_config() {
-  local masked="(none)"
+  local masked="(none)" relay="(none, sending directly to the app)" topic
   if [ -n "$TOKEN" ]; then masked="${TOKEN:0:4}...(${#TOKEN} chars)"; fi
+  if [ -n "$RELAY" ]; then
+    topic="${RELAY##*/}"
+    relay="${RELAY%/*}/(topic hidden, ${#topic} chars)"
+  fi
   echo "config file: $CONFIG_FILE"
   echo "host:        $HOST"
   echo "port:        $PORT"
   echo "token:       $masked"
+  echo "relay:       $relay"
 }
 
 cmd_health() {
+  if [ -n "$RELAY" ]; then
+    echo "relay mode: requests go through ${RELAY%/*} (nothing to check from here; use 'inoty send' to test)"
+    return 0
+  fi
   curl -sS --max-time 5 "$(base_url)/health" || die "could not reach iNoty at $(base_url)"
   echo
 }
 
 cmd_clear() {
+  local json
   if [ $# -ge 1 ] && [ -n "$1" ]; then
-    send_json /clear "{\"id\":\"$(json_escape "$1")\"}"
+    if [ -n "$RELAY" ]; then json="{\"clear\":true,\"id\":\"$(json_escape "$1")\"}"
+    else json="{\"id\":\"$(json_escape "$1")\"}"; fi
   else
-    send_json /clear "{}"
+    if [ -n "$RELAY" ]; then json='{"clear":true}'; else json='{}'; fi
   fi
+  send_json /clear "$json"
 }
 
 cmd_raw() {
@@ -266,6 +318,8 @@ usage() {
 inoty - send notifications to the iNoty app
 
   inoty setup [--token T] [--host H] [--port P]   save token/host/port (prompts for the token)
+  inoty setup --relay URL                         send over the internet via the relay (no token needed)
+  inoty setup --no-relay                          go back to sending directly to the app
   inoty send TITLE [MESSAGE] [options]            send a notification (use '-' as MESSAGE to read stdin)
   inoty TITLE [MESSAGE] [options]                 shorthand for send
   inoty clear [ID]                                remove a notification by id, or all of them
@@ -291,6 +345,11 @@ Options for send:
       --action SPEC        add a button: 'id|Title|url|destructive,foreground,auth' (repeatable)
       --data KEY=VALUE     custom payload field (repeatable)
       --dry-run            print the JSON instead of sending it
+
+Relay mode: copy the address from the app's "Internet relay" card and run
+  inoty setup --relay https://ntfy.sh/inoty-xxxxxxxx
+After that every command is sent through the relay, from any network. Requests must stay under
+4096 bytes (so no --image-file). For a single command straight to the app: INOTY_RELAY= inoty ...
 
 Examples:
   inoty send "Build done" "All tests passed"

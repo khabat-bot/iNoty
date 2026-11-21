@@ -2,7 +2,7 @@
 
 A tiny iOS app for LiveContainer. It runs a minimal HTTP server and turns each request into a fully customizable local notification. It stays alive in the background by looping silent audio.
 
-By default the server listens on `127.0.0.1` only, so nothing on your Wi-Fi can reach it. Letting other devices on your network send requests is an optional switch in the app (off by default).
+By default the server listens on `127.0.0.1` only, so nothing on your Wi-Fi can reach it. Letting other devices on your network send requests is an optional switch in the app (off by default), and so is receiving requests from the internet through a relay.
 
 The UI uses Liquid Glass on iOS 26 and falls back to a blur material on older versions.
 
@@ -94,6 +94,31 @@ Turn on "Allow other devices on my network" in the app. The server then listens 
 - The app shows the address to use. On the other device run `inoty setup --host THAT_ADDRESS`.
 - iOS may ask for Local Network permission, which inside LiveContainer belongs to LiveContainer itself (iOS Settings, Privacy & Security, Local Network).
 - If the token ever leaks, tap Regenerate in the app and run `inoty setup` again.
+
+## Internet relay (optional)
+
+To send from anywhere (another network, a server, an agent running in the cloud), turn on "Receive requests over the internet" in the app. The app then makes an **outgoing** HTTPS connection to a relay (a free [ntfy](https://ntfy.sh) topic by default) and turns every message posted to that topic into a notification. Nothing is opened on your phone, so it works on cellular and behind any router.
+
+The "Internet relay" card shows the secret address, for example `https://ntfy.sh/inoty-0123...`. Send to it with the script:
+
+```sh
+inoty setup --relay https://ntfy.sh/inoty-0123...     # once, on the sending machine
+inoty send "Agent finished" "Refactor is done"       # now goes over the internet
+```
+
+or with plain curl. A text body becomes the notification body, and the `Title` header becomes the title. A JSON body can use every field from the table above, and `{"clear":true,"id":"x"}` removes a notification:
+
+```sh
+curl -d "Agent finished" https://ntfy.sh/inoty-0123...
+curl -H "Title: Agent" -d "Refactor is done" https://ntfy.sh/inoty-0123...
+curl -d '{"title":"Agent","body":"Done","level":"timeSensitive"}' https://ntfy.sh/inoty-0123...
+```
+
+- If the phone is offline, messages are fetched when it reconnects, as long as the relay still has them (12 hours on ntfy.sh by default).
+- Keep messages under about 4096 bytes, so no `imageBase64` (an `image` URL is fine). ntfy.sh limits anonymous senders to a burst of 60 requests and then one every 5 seconds.
+- **The address is a password.** Anyone who has it can send you notifications, including ones with links and images, and the relay server can read every message. Don't send anything sensitive. "New topic" in the app replaces the address, and the old one stops working.
+- To use your own ntfy server, set its https address under the gear button, "Relay server".
+- Untested inside LiveContainer: whether iOS keeps the connection alive while the app is in the background. The app reconnects automatically when it can and when you open it.
 
 ## Build
 
