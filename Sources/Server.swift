@@ -69,6 +69,8 @@ final class LocalServer {
         done("", "server not ready")
     }
     var onClear: (_ id: String?) -> Void = { _ in }
+    /// Called when a request with a valid token was refused because its fields were invalid.
+    var onRejected: (_ details: String, _ error: String) -> Void = { _, _ in }
 
     private let queue = DispatchQueue(label: "inoty.server")
     private let lock = NSLock()
@@ -266,10 +268,22 @@ final class LocalServer {
     }
 
     private func handleNotify(_ req: HTTPRequest, on c: NWConnection) {
+        let raw: [String: Any]
+        do {
+            raw = try payload(for: req)
+        } catch let e as SpecError {
+            respond(c, 400, ["ok": false, "error": e.description])
+            return
+        } catch {
+            respond(c, 400, ["ok": false, "error": "bad request"])
+            return
+        }
+
         let spec: NotificationSpec
         do {
-            spec = try NotificationSpec.from(try payload(for: req))
+            spec = try NotificationSpec.from(raw)
         } catch let e as SpecError {
+            onRejected(NotificationSpec.describe(raw), e.description)
             respond(c, 400, ["ok": false, "error": e.description])
             return
         } catch {

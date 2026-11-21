@@ -41,11 +41,26 @@ struct NotificationSpec {
     var at: Date?
     var actions: [NotificationAction] = []
     var data: [String: Any] = [:]
+    var details = ""                      // readable copy of the request, shown in the history
 }
 
 extension NotificationSpec {
+    /// Pretty-printed request for the history list. Large image data is replaced by its length.
+    static func describe(_ raw: [String: Any]) -> String {
+        var copy = raw
+        if let b = copy["imageBase64"] as? String { copy["imageBase64"] = "<\(b.count) characters>" }
+        guard JSONSerialization.isValidJSONObject(copy),
+              let data = try? JSONSerialization.data(
+                withJSONObject: copy,
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let text = String(data: data, encoding: .utf8)
+        else { return "" }
+        return String(text.prefix(4000))
+    }
+
     static func from(_ raw: [String: Any]) throws -> NotificationSpec {
         var s = NotificationSpec()
+        s.details = describe(raw)
 
         s.id = raw.string("id", "identifier")
         s.title = String((raw.string("title") ?? "").prefix(200))
@@ -55,10 +70,17 @@ extension NotificationSpec {
 
         if let snd = raw.string("sound") {
             let v = snd.lowercased()
-            guard ["default", "none", "ringtone"].contains(v) else {
-                throw SpecError("sound must be default, none or ringtone")
+            if SoundStore.reserved.contains(v) {
+                s.sound = v
+            } else if SoundStore.fileName(for: snd) != nil {
+                s.sound = snd
+            } else {
+                let installed = SoundStore.list()
+                let hint = installed.isEmpty
+                    ? " (no custom sounds added in the app yet)"
+                    : ", or one of: " + installed.joined(separator: ", ")
+                throw SpecError("unknown sound '\(snd)'. Use default, none, ringtone\(hint)")
             }
-            s.sound = v
         }
 
         if raw["badge"] != nil {

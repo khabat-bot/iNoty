@@ -67,8 +67,15 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             } else {
                 content.sound = UNNotificationSound.default
             }
-        default:
+        case "default":
             content.sound = UNNotificationSound.default
+        default:
+            // A custom sound added in the app; fall back to the default if it vanished meanwhile.
+            if let file = SoundStore.fileName(for: spec.sound) {
+                content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: file))
+            } else {
+                content.sound = UNNotificationSound.default
+            }
         }
 
         if let b = spec.badge { content.badge = NSNumber(value: b) }

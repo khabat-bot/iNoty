@@ -1,19 +1,36 @@
+import AVFoundation
 import Foundation
 import Security
 import UIKit
+
+/// One line of the request history (kept across launches).
+struct HistoryEntry: Codable, Identifiable {
+    var id = UUID()
+    var date = Date()
+    var kind: String          // "notify", "test" or "clear"
+    var title: String
+    var body: String
+    var ok: Bool
+    var error: String?
+    var details: String       // the request fields, pretty printed
+}
 
 /// Owns the server, the silent-audio keep-alive and the UI state.
 /// All @Published mutations happen on the main queue.
 final class AppModel: ObservableObject {
     static let port: UInt16 = 8765
+    private static let historyKey = "inoty.history"
+    private static let maxHistory = 100
 
     @Published var token: String
     @Published var allowNetwork: Bool
     @Published var lanAddress: String?
     @Published var serverStatus = "Starting"
     @Published var audioStatus = "Starting"
-    @Published var log: [String] = []
+    @Published var history: [HistoryEntry]
+    @Published var sounds: [String]
 
+    private var previewPlayer: AVAudioPlayer?
     private let server = LocalServer()
     private let audio = SilentAudio()
     private var started = false
@@ -29,6 +46,8 @@ final class AppModel: ObservableObject {
             token = fresh
         }
         allowNetwork = defaults.bool(forKey: "allowNetwork")
+        history = AppModel.loadHistory()
+        sounds = SoundStore.list()
     }
 
     var serverOK: Bool { serverStatus.hasPrefix("Listening") }
@@ -56,16 +75,25 @@ final class AppModel: ObservableObject {
         }
         server.onNotify = { [weak self] spec, done in
             Notifier.shared.post(spec) { identifier, error in
-                let label = spec.title.isEmpty ? spec.body : spec.title
                 DispatchQueue.main.async {
-                    self?.addLog(error == nil ? label : "Failed: \(label)")
+                    self?.record(kind: "notify", title: spec.title, body: spec.body,
+                                 error: error, details: spec.details)
                 }
                 done(identifier, error)
             }
         }
+        server.onRejected = { [weak self] details, error in
+            DispatchQueue.main.async {
+                self?.record(kind: "notify", title: "Rejected request", body: "",
+                             error: error, details: details)
+            }
+        }
         server.onClear = { [weak self] id in
             Notifier.shared.clear(id: id)
-            DispatchQueue.main.async { self?.addLog(id.map { "Cleared \($0)" } ?? "Cleared all") }
+            DispatchQueue.main.async {
+                self?.record(kind: "clear", title: id.map { "Clear \($0)" } ?? "Clear all", body: "",
+                             error: nil, details: "")
+            }
         }
         audio.onState = { [weak self] status in
             DispatchQueue.main.async { self?.audioStatus = status }
@@ -111,20 +139,105 @@ final class AppModel: ObservableObject {
         spec.body = "Test notification"
         Notifier.shared.post(spec) { [weak self] _, error in
             DispatchQueue.main.async {
-                self?.addLog(error == nil ? "Test notification" : "Test failed: \(error ?? "")")
+                self?.record(kind: "test", title: spec.title, body: spec.body, error: error, details: "")
             }
         }
     }
 
-    private func refreshLAN() {
-        lanAddress = LocalIP.ipv4()
+    func clearHistory() {
+        history = []
+        saveHistory()
     }
 
-    private func addLog(_ text: String) {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        log.insert("\(f.string(from: Date()))  \(String(text.prefix(80)))", at: 0)
-        if log.count > 30 { log.removeLast(log.count - 30) }
+    // MARK: Sounds
+
+    /// Converts and installs the picked files, then reports what happened in one line.
+    func importSounds(_ urls: [URL], completion: @escaping (String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var added: [String] = []
+            var failed: [String] = []
+            for url in urls {
+                do {
+                    added.append(try SoundStore.importFile(from: url))
+                } catch {
+                    failed.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            DispatchQueue.main.async {
+                self?.sounds = SoundStore.list()
+                var parts: [String] = []
+                if !added.isEmpty { parts.append("Added " + added.joined(separator: ", ")) }
+                if !failed.isEmpty { parts.append("Failed: " + failed.joined(separator: "; ")) }
+                completion(parts.isEmpty ? "Nothing added" : parts.joined(separator: ". "))
+            }
+        }
+    }
+
+    func deleteSound(_ name: String) {
+        SoundStore.delete(name: name)
+        sounds = SoundStore.list()
+    }
+
+    /// Plays the file inside the app (this does not go through notifications).
+    func preview(_ name: String) {
+        do {
+            let player = try AVAudioPlayer(contentsOf: SoundStore.url(forName: name))
+            previewPlayer = player
+            player.play()
+        } catch {
+            previewPlayer = nil
+        }
+    }
+
+    /// Sends a real notification using the sound, to check that iOS actually plays it.
+    func testSound(_ name: String) {
+        var spec = NotificationSpec()
+        spec.title = "Sound test"
+        spec.body = name
+        spec.sound = name
+        Notifier.shared.post(spec) { [weak self] _, error in
+            DispatchQueue.main.async {
+                self?.record(kind: "test", title: spec.title, body: spec.body, error: error, details: "")
+            }
+        }
+    }
+
+    // MARK: History
+
+    /// Must be called on the main queue.
+    private func record(kind: String, title: String, body: String, error: String?, details: String) {
+        let entry = HistoryEntry(
+            kind: kind,
+            title: String(title.prefix(200)),
+            body: String(body.prefix(500)),
+            ok: error == nil,
+            error: error,
+            details: details
+        )
+        history.insert(entry, at: 0)
+        if history.count > AppModel.maxHistory {
+            history.removeLast(history.count - AppModel.maxHistory)
+        }
+        saveHistory()
+    }
+
+    private func saveHistory() {
+        if let data = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(data, forKey: AppModel.historyKey)
+        }
+    }
+
+    private static func loadHistory() -> [HistoryEntry] {
+        guard let data = UserDefaults.standard.data(forKey: historyKey),
+              let list = try? JSONDecoder().decode([HistoryEntry].self, from: data)
+        else { return [] }
+        return list
+    }
+
+    // MARK: Helpers
+
+    private func refreshLAN() {
+        lanAddress = LocalIP.ipv4()
     }
 
     private static func makeToken() -> String {

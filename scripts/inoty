@@ -274,7 +274,7 @@ inoty - send notifications to the iNoty app
 
 Options for send:
   -s, --subtitle TEXT      second line
-      --sound VALUE        default | none | ringtone
+      --sound VALUE        default | none | ringtone | the name of a sound added in the app
       --badge N            app badge number
       --level VALUE        passive | active | timeSensitive
       --relevance 0-1      ordering in the notification summary

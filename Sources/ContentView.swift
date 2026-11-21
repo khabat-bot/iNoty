@@ -118,7 +118,13 @@ private struct StatusPill: View {
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    private enum ActiveSheet: Identifiable {
+        case history, picker
+        var id: Int { self == .history ? 0 : 1 }
+    }
+
     @State private var toast: String?
+    @State private var sheet: ActiveSheet?
 
     var body: some View {
         ZStack {
@@ -199,18 +205,61 @@ struct ContentView: View {
                         }
                     }
 
-                    Card("Recent requests") {
-                        if model.log.isEmpty {
+                    Card("History") {
+                        if model.history.isEmpty {
                             Text("Nothing yet")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         } else {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(Array(model.log.enumerated()), id: \.offset) { _, line in
-                                    Text(line)
-                                        .font(.system(.footnote, design: .monospaced))
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(model.history.prefix(5)) { entry in
+                                    HistoryRow(entry: entry)
                                 }
                             }
+                            GlassButton(title: "Open full history", systemImage: "clock.arrow.circlepath") {
+                                sheet = .history
+                            }
+                        }
+                    }
+
+                    Card("Notification sounds") {
+                        if model.sounds.isEmpty {
+                            Text("No custom sounds yet. Add an audio file (up to 30 seconds), then put its name in the sound field of a request.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(model.sounds, id: \.self) { name in
+                                    HStack(spacing: 16) {
+                                        Text(name)
+                                            .font(.system(.subheadline, design: .monospaced))
+                                            .lineLimit(1)
+                                        Spacer(minLength: 8)
+                                        Button { model.preview(name) } label: {
+                                            Image(systemName: "play.fill")
+                                        }
+                                        .accessibilityLabel("Play \(name) in the app")
+                                        Button {
+                                            model.testSound(name)
+                                            flash("Test notification sent")
+                                        } label: {
+                                            Image(systemName: "bell.fill")
+                                        }
+                                        .accessibilityLabel("Send a test notification with \(name)")
+                                        Button(role: .destructive) { model.deleteSound(name) } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                        .accessibilityLabel("Delete \(name)")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                            Text("Play previews inside the app. The bell sends a real notification, which is the real test of whether iOS plays the sound.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        GlassButton(title: "Add sound", systemImage: "plus", prominent: true) {
+                            sheet = .picker
                         }
                     }
                 }
@@ -230,11 +279,22 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: toast)
+        .sheet(item: $sheet) { which in
+            switch which {
+            case .history:
+                HistoryView().environmentObject(model)
+            case .picker:
+                SoundPicker { urls in
+                    sheet = nil
+                    model.importSounds(urls) { message in flash(message, seconds: 4) }
+                }
+            }
+        }
     }
 
-    private func flash(_ text: String) {
+    private func flash(_ text: String, seconds: Double = 1.5) {
         toast = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
             if toast == text { toast = nil }
         }
     }
