@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 import Security
 import UIKit
@@ -20,7 +19,9 @@ struct HistoryEntry: Codable, Identifiable {
 final class AppModel: ObservableObject {
     static let port: UInt16 = 8765
     private static let historyKey = "inoty.history"
-    private static let maxHistory = 100
+    private static let historyLimitKey = "inoty.historyLimit"
+    static let historyLimitRange = 10...500
+    static let defaultHistoryLimit = 100
 
     @Published var token: String
     @Published var allowNetwork: Bool
@@ -28,9 +29,8 @@ final class AppModel: ObservableObject {
     @Published var serverStatus = "Starting"
     @Published var audioStatus = "Starting"
     @Published var history: [HistoryEntry]
-    @Published var sounds: [String]
+    @Published var historyLimit: Int
 
-    private var previewPlayer: AVAudioPlayer?
     private let server = LocalServer()
     private let audio = SilentAudio()
     private var started = false
@@ -46,8 +46,10 @@ final class AppModel: ObservableObject {
             token = fresh
         }
         allowNetwork = defaults.bool(forKey: "allowNetwork")
-        history = AppModel.loadHistory()
-        sounds = SoundStore.list()
+        let savedLimit = defaults.integer(forKey: AppModel.historyLimitKey)
+        let limit = AppModel.historyLimitRange.contains(savedLimit) ? savedLimit : AppModel.defaultHistoryLimit
+        historyLimit = limit
+        history = Array(AppModel.loadHistory().prefix(limit))
     }
 
     var serverOK: Bool { serverStatus.hasPrefix("Listening") }
@@ -149,56 +151,14 @@ final class AppModel: ObservableObject {
         saveHistory()
     }
 
-    // MARK: Sounds
-
-    /// Converts and installs the picked files, then reports what happened in one line.
-    func importSounds(_ urls: [URL], completion: @escaping (String) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var added: [String] = []
-            var failed: [String] = []
-            for url in urls {
-                do {
-                    added.append(try SoundStore.importFile(from: url))
-                } catch {
-                    failed.append("\(url.lastPathComponent): \(error.localizedDescription)")
-                }
-            }
-            DispatchQueue.main.async {
-                self?.sounds = SoundStore.list()
-                var parts: [String] = []
-                if !added.isEmpty { parts.append("Added " + added.joined(separator: ", ")) }
-                if !failed.isEmpty { parts.append("Failed: " + failed.joined(separator: "; ")) }
-                completion(parts.isEmpty ? "Nothing added" : parts.joined(separator: ". "))
-            }
-        }
-    }
-
-    func deleteSound(_ name: String) {
-        SoundStore.delete(name: name)
-        sounds = SoundStore.list()
-    }
-
-    /// Plays the file inside the app (this does not go through notifications).
-    func preview(_ name: String) {
-        do {
-            let player = try AVAudioPlayer(contentsOf: SoundStore.url(forName: name))
-            previewPlayer = player
-            player.play()
-        } catch {
-            previewPlayer = nil
-        }
-    }
-
-    /// Sends a real notification using the sound, to check that iOS actually plays it.
-    func testSound(_ name: String) {
-        var spec = NotificationSpec()
-        spec.title = "Sound test"
-        spec.body = name
-        spec.sound = name
-        Notifier.shared.post(spec) { [weak self] _, error in
-            DispatchQueue.main.async {
-                self?.record(kind: "test", title: spec.title, body: spec.body, error: error, details: "")
-            }
+    /// Changes how many requests are kept; older ones beyond the new limit are deleted.
+    func setHistoryLimit(_ value: Int) {
+        let limit = min(max(value, AppModel.historyLimitRange.lowerBound), AppModel.historyLimitRange.upperBound)
+        UserDefaults.standard.set(limit, forKey: AppModel.historyLimitKey)
+        historyLimit = limit
+        if history.count > limit {
+            history.removeLast(history.count - limit)
+            saveHistory()
         }
     }
 
@@ -215,8 +175,8 @@ final class AppModel: ObservableObject {
             details: details
         )
         history.insert(entry, at: 0)
-        if history.count > AppModel.maxHistory {
-            history.removeLast(history.count - AppModel.maxHistory)
+        if history.count > historyLimit {
+            history.removeLast(history.count - historyLimit)
         }
         saveHistory()
     }

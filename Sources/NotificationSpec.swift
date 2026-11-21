@@ -70,17 +70,10 @@ extension NotificationSpec {
 
         if let snd = raw.string("sound") {
             let v = snd.lowercased()
-            if SoundStore.reserved.contains(v) {
-                s.sound = v
-            } else if SoundStore.fileName(for: snd) != nil {
-                s.sound = snd
-            } else {
-                let installed = SoundStore.list()
-                let hint = installed.isEmpty
-                    ? " (no custom sounds added in the app yet)"
-                    : ", or one of: " + installed.joined(separator: ", ")
-                throw SpecError("unknown sound '\(snd)'. Use default, none, ringtone\(hint)")
+            guard ["default", "none", "ringtone"].contains(v) else {
+                throw SpecError("sound must be default, none or ringtone")
             }
+            s.sound = v
         }
 
         if raw["badge"] != nil {

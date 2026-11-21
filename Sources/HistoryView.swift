@@ -45,6 +45,7 @@ struct HistoryView: View {
                     List(model.history) { entry in
                         NavigationLink(destination: HistoryDetail(entry: entry)) {
                             HistoryRow(entry: entry)
+                                .padding(.vertical, 6)
                         }
                     }
                 }

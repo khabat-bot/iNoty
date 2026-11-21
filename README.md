@@ -63,7 +63,7 @@ Success returns `{"ok":true,"id":"..."}`. Problems return `{"ok":false,"error":"
 | Field | Meaning |
 |---|---|
 | `title`, `subtitle`, `body` | Text (`message` and `text` work as aliases for `body`). One of title or body is required. |
-| `sound` | `default`, `none`, `ringtone`, or the name of a sound you added in the app (see Custom sounds) |
+| `sound` | `default`, `none` or `ringtone` |
 | `badge` | App badge number (0 clears it) |
 | `level` | `passive`, `active` or `timeSensitive` |
 | `relevance` | 0 to 1, orders it in the notification summary |
@@ -80,23 +80,11 @@ Success returns `{"ok":true,"id":"..."}`. Problems return `{"ok":false,"error":"
 | `actions` | Buttons: `[{"id":"yes","title":"Deploy","url":"https://...","destructive":false,"foreground":false,"auth":false}]` (up to 10; a button with a `url` opens the app to open it) |
 | `data` | Any JSON object, stored in the notification's userInfo |
 
-Not possible: running code sent over HTTP. The API exposes every notification option iOS offers instead. Sounds cannot be uploaded through a request either, they are added in the app (below).
-
-## Custom sounds
-
-In the app, "Notification sounds", then "Add sound", pick one or more audio files (mp3, m4a, wav, aiff and caf all work, up to 30 seconds, which is an iOS limit). Each is converted to a `.caf` and named after the file, with spaces turned into `-`. Then use the name in a request:
-
-```sh
-inoty send "Done" "Build finished" --sound my-sound
-```
-
-An unknown name is refused, and the error lists the sounds that are installed. In the list, play previews inside the app, the bell sends a real notification with that sound, and the bin deletes it.
-
-Uncertain inside LiveContainer: iOS looks for notification sounds in the app's own Library/Sounds folder, and with "Fix Local Notification" the notifications may be posted under LiveContainer's identity. If the preview plays but the bell's notification only makes the default sound, that is the cause.
+Not possible: running code sent over HTTP, and custom sound files. The API exposes every notification option iOS offers instead.
 
 ## History
 
-The main screen shows the last 5 requests. "Open full history" lists the last 100 (kept across launches); tap one to see its time, result and every field that was sent. Requests that were refused because a field was invalid show up in red with the reason. Image data is not stored, only its length. Requests with a wrong token are not recorded.
+The main screen shows the last 5 requests. "Open full history" lists the saved ones (kept across launches; 100 by default, change it from 10 to 500 with the gear button in the top right, which deletes the oldest ones if you lower it); tap one to see its time, result and every field that was sent. Requests that were refused because a field was invalid show up in red with the reason. Image data is not stored, only its length. Requests with a wrong token are not recorded.
 
 ## Network access (optional)
 
